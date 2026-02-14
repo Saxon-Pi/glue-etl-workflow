@@ -80,7 +80,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     });
 
     // DQ チェック / CSV -> Parquet 変換 / データ変換
-    const dqScript = `s3://${rawBucket.bucketName}/glue-scripts/dq_check.py`;
+    const dqScript = `s3://${rawBucket.bucketName}/glue-scripts/dq_check_dqdl.py`;
     const c2pScript = `s3://${rawBucket.bucketName}/glue-scripts/csv_to_parquet.py`;
     const trScript = `s3://${rawBucket.bucketName}/glue-scripts/transform_curated.py`;
 
