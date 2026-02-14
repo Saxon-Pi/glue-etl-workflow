@@ -48,26 +48,27 @@ Rules = [
 dq_result = EvaluateDataQuality().process_rows(
     frame=dyf,
     ruleset=ruleset,
+    # CloudWatchメトリクスを使用する場合は有効にする
     publishing_options={
-        # CloudWatchメトリクスを使用する場合は有効
         # "dataQualityEvaluationContext": "orders-dq",
         # "enableDataQualityCloudWatchMetrics": True,
         # "enableDataQualityResultsPublishing": True,
     }
 )
+print("DQ_RESULT_KEYS=", dq_result.keys())
 
 # dq_result は DynamicFrameCollection として出力される
 # rules_outcomes: ルール単位の集計結果 (ルール違反の件数など)
-rules_outcomes = dq_result.select("rulesOutcomes")
+rules_outcomes = dq_result.select("ruleOutcomes")
 # row_outcomes: 行単位の評価結果 (各レコードがどのルールに違反したかなど)
-row_outcomes = dq_result.select("rowLevelOutcomes")
+row_outcomes   = dq_result.select("rowLevelOutcomes")
 
 # rulesOutcomes を Spark DF にして集計（失敗ルールがあるか）
 rules_df = rules_outcomes.toDF()
 
-print("=== rulesOutcomes schema ===")
+print("=== ruleOutcomes schema ===")
 rules_df.printSchema()
-print("=== rulesOutcomes sample ===")
+print("=== ruleOutcomes sample ===")
 rules_df.show(truncate=False)
 
 # rulesOutcomes の列名が環境でブレることがあるので、どの列が存在するかで失敗ルールの抽出法を切り替える
@@ -75,18 +76,64 @@ rules_df.show(truncate=False)
 failed_rules = []
 cols = set(rules_df.columns) # DataFrame に存在する列名一覧
 
+# Outcome 列を使用するパターン: Outcome 列が Passed でない (=Failed) なら失敗
 if "Outcome" in cols and "Rule" in cols:
-    # Outcome 列を使用するパターン: Outcome 列が Passed でない (=Failed) なら失敗
-    failed = rules_df.filter(rules_df["Outcome"] != "Passed").select("Rule", "Outcome").collect()
-    failed_rules = [{"rule": r["Rule"], "outcome": r["Outcome"]} for r in failed]
+    # FailureReason / EvaluatedMetrics を通知に含める
+    sel_cols = ["Rule", "Outcome"]
+    if "FailureReason" in cols:
+        sel_cols.append("FailureReason")
+    if "EvaluatedMetrics" in cols:
+        sel_cols.append("EvaluatedMetrics")
+    if "EvaluatedRule" in cols:
+        sel_cols.append("EvaluatedRule")
 
+    failed = (rules_df
+              .filter(rules_df["Outcome"] != "Passed")
+              .select(*sel_cols)
+              .collect())
+
+    failed_rules = []
+    for r in failed:
+        item = {
+            "rule": r["Rule"],
+            "outcome": r["Outcome"],
+        }
+        if "FailureReason" in sel_cols:
+            item["reason"] = r["FailureReason"]
+        if "EvaluatedMetrics" in sel_cols:
+            item["metrics"] = dict(r["EvaluatedMetrics"]) if r["EvaluatedMetrics"] is not None else None
+        if "EvaluatedRule" in sel_cols:
+            item["evaluated_rule"] = r["EvaluatedRule"]
+        failed_rules.append(item)
+
+# Passed 列を使用するパターン: Passed 列が false なら失敗
 elif "Passed" in cols and "Rule" in cols:
-    # Passed 列を使用するパターン: Passed 列が false なら失敗
-    failed = rules_df.filter(rules_df["Passed"] == False).select("Rule", "Passed").collect()
-    failed_rules = [{"rule": r["Rule"], "passed": r["Passed"]} for r in failed]
+    sel_cols = ["Rule", "Passed"]
+    if "FailureReason" in cols:
+        sel_cols.append("FailureReason")
+    if "EvaluatedMetrics" in cols:
+        sel_cols.append("EvaluatedMetrics")
+    if "EvaluatedRule" in cols:
+        sel_cols.append("EvaluatedRule")
 
+    failed = (rules_df
+              .filter(rules_df["Passed"] == False)
+              .select(*sel_cols)
+              .collect())
+
+    failed_rules = []
+    for r in failed:
+        item = {"rule": r["Rule"], "passed": r["Passed"]}
+        if "FailureReason" in sel_cols:
+            item["reason"] = r["FailureReason"]
+        if "EvaluatedMetrics" in sel_cols:
+            item["metrics"] = dict(r["EvaluatedMetrics"]) if r["EvaluatedMetrics"] is not None else None
+        if "EvaluatedRule" in sel_cols:
+            item["evaluated_rule"] = r["EvaluatedRule"]
+        failed_rules.append(item)
+
+# 上記パターンに当てはまらない場合: 失敗とする (コードを修正して吸収するように)
 else:
-    # 上記パターンに当てはまらない場合: 失敗とする (コードを修正して吸収するように)
     print("rulesOutcomes columns are unexpected:", rules_df.columns)
     failed_rules = [{"rule": "UNKNOWN_SCHEMA", "detail": "rulesOutcomes schema unexpected"}]
 
