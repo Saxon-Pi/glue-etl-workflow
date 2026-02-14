@@ -85,26 +85,23 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     const trScript = `s3://${rawBucket.bucketName}/glue-scripts/transform_curated.py`;
 
     // Glue ジョブ (DQ チェック)
-    // ???
-    const commonJobProps: glue.CfnJob.JobCommandProperty = {
-      name: "glueetl",
-      pythonVersion: "3",
-      scriptLocation: dqScript,
-    };
-
     const dqJob = new glue.CfnJob(this, "DqJob", {
       name: "orders-dq-check",
       role: glueRole.roleArn,
       glueVersion: "4.0",
       numberOfWorkers: 2,
       workerType: "G.1X",
-      command: { ...commonJobProps, scriptLocation: dqScript },
+      command: {
+        name: "glueetl",
+        pythonVersion: "3",
+        scriptLocation: dqScript,
+      },
       defaultArguments: {
         "--job-language": "python",
-        "--RAW_BUCKET": rawBucket.bucketName,
-        "--RAW_PREFIX": "orders/raw/",
-        "--ALERT_TOPIC_ARN": alertTopic.topicArn,
-        "--enable-continuous-cloudwatch-log": "true",
+        "--RAW_BUCKET": rawBucket.bucketName,         // 生データ格納バケット
+        "--RAW_PREFIX": "orders/raw/",                // prefix
+        "--ALERT_TOPIC_ARN": alertTopic.topicArn,     // SNS トピック
+        "--enable-continuous-cloudwatch-log": "true", // ログ
       },
       executionProperty: { maxConcurrentRuns: 1 },
     });
