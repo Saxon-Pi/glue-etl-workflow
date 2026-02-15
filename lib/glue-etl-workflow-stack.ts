@@ -84,7 +84,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     const c2pScript = `s3://${rawBucket.bucketName}/glue-scripts/csv_to_parquet.py`;
     const trScript = `s3://${rawBucket.bucketName}/glue-scripts/transform_curated.py`;
 
-    // Glue ジョブ (DQ チェック)
+    // Glue ジョブ #1 (DQチェック)
     const dqJob = new glue.CfnJob(this, "DqJob", {
       name: "orders-dq-check",
       role: glueRole.roleArn,
@@ -102,6 +102,29 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
         "--RAW_PREFIX": "orders/raw/",                // prefix
         "--ALERT_TOPIC_ARN": alertTopic.topicArn,     // SNS トピック
         "--enable-continuous-cloudwatch-log": "true", // ログ
+      },
+      executionProperty: { maxConcurrentRuns: 1 },
+    });
+
+    // Glue ジョブ #2 (CSV->Parquet変換)
+    const c2pJob = new glue.CfnJob(this, "CsvToParquetJob", {
+      name: "orders-csv-to-parquet",
+      role: glueRole.roleArn,
+      glueVersion: "4.0",
+      numberOfWorkers: 2,
+      workerType: "G.1X",
+      command: {
+        name: "glueetl",
+        pythonVersion: "3",
+        scriptLocation: c2pScript
+      },
+      defaultArguments: {
+        "--job-language": "python",
+        "--RAW_BUCKET": rawBucket.bucketName,
+        "--RAW_PREFIX": "orders/raw/",
+        "--STAGING_BUCKET": stagingBucket.bucketName, // 変換ファイル格納バケット
+        "--STAGING_PREFIX": "orders/parquet/",        // prefix
+        "--enable-continuous-cloudwatch-log": "true",
       },
       executionProperty: { maxConcurrentRuns: 1 },
     });
