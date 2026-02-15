@@ -144,13 +144,17 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     });
 
     // Step 2: Parquet 変換
+    // ** Glue コンソールの Data Integration and ETL > Triggers から t-after-dq を Activate trigger する必要あり **
+    // -> startOnCreation: true に最初からしておけば問題ない、はず
     const t2 = new glue.CfnTrigger(this, "TriggerAfterDQ", {
       name: "t-after-dq",
-      type: "CONDITIONAL",
+      type: "CONDITIONAL", // predicate の条件が成立したら発火する
       workflowName: workflow.name,
+      startOnCreation: true,
       predicate: {
-        logical: "AND",
+        logical: "AND",    // conditions が 1つでも AND にしておく (エラー回避)
         conditions: [
+        // dqJob の実行結果（state）が SUCCEEDED と等しい場合に、このトリガーを発火する
           { 
             jobName: dqJob.name!,
             state: "SUCCEEDED",
