@@ -149,15 +149,26 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       type: "CONDITIONAL",
       workflowName: workflow.name,
       predicate: {
-        conditions: [{ jobName: dqJob.name!, state: "SUCCEEDED" }],
+        logical: "AND",
+        conditions: [
+          { 
+            jobName: dqJob.name!,
+            state: "SUCCEEDED",
+            logicalOperator: "EQUALS",
+          }
+        ],
       },
       actions: [{ jobName: c2pJob.name! }],
     });
 
     // 依存関係
-    t2.addDependency(dqJob);
+    t1.addDependency(workflow);
+    t1.addDependency(dqJob);
 
-    
+    t2.addDependency(workflow);
+    t2.addDependency(dqJob);
+    t2.addDependency(c2pJob);
+
     // Outputs
     new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
     new cdk.CfnOutput(this, "WorkflowName", { value: workflow.name! });
