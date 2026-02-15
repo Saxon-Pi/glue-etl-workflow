@@ -130,5 +130,38 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     });
 
 
+    // Glue ワークフロー
+    const workflow = new glue.CfnWorkflow(this, "OrdersWorkflow", {
+      name: "orders-etl-workflow",
+    });
+
+    // Step 1: DQ チェック
+    const t1 = new glue.CfnTrigger(this, "TriggerStartDQ", {
+      name: "t-start-dq",
+      type: "ON_DEMAND",
+      workflowName: workflow.name,
+      actions: [{ jobName: dqJob.name! }],
+    });
+
+    // Step 2: Parquet 変換
+    const t2 = new glue.CfnTrigger(this, "TriggerAfterDQ", {
+      name: "t-after-dq",
+      type: "CONDITIONAL",
+      workflowName: workflow.name,
+      predicate: {
+        conditions: [{ jobName: dqJob.name!, state: "SUCCEEDED" }],
+      },
+      actions: [{ jobName: c2pJob.name! }],
+    });
+
+    // 依存関係
+    t2.addDependency(dqJob);
+
+    
+    // Outputs
+    new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
+    new cdk.CfnOutput(this, "WorkflowName", { value: workflow.name! });
+    new cdk.CfnOutput(this, "StartTriggerName", { value: t1.name! });
+    new cdk.CfnOutput(this, "AlertTopicArn", { value: alertTopic.topicArn });
   }
 }
