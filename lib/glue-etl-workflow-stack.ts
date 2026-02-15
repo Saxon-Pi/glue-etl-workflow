@@ -84,7 +84,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     const c2pScript = `s3://${rawBucket.bucketName}/glue-scripts/csv_to_parquet.py`;
     const trScript = `s3://${rawBucket.bucketName}/glue-scripts/transform_curated.py`;
 
-    // Glue ジョブ (DQ チェック)
+    // Glue ジョブ #1 (DQチェック)
     const dqJob = new glue.CfnJob(this, "DqJob", {
       name: "orders-dq-check",
       role: glueRole.roleArn,
@@ -106,6 +106,77 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       executionProperty: { maxConcurrentRuns: 1 },
     });
 
+    // Glue ジョブ #2 (CSV->Parquet変換)
+    const c2pJob = new glue.CfnJob(this, "CsvToParquetJob", {
+      name: "orders-csv-to-parquet",
+      role: glueRole.roleArn,
+      glueVersion: "4.0",
+      numberOfWorkers: 2,
+      workerType: "G.1X",
+      command: {
+        name: "glueetl",
+        pythonVersion: "3",
+        scriptLocation: c2pScript
+      },
+      defaultArguments: {
+        "--job-language": "python",
+        "--RAW_BUCKET": rawBucket.bucketName,
+        "--RAW_PREFIX": "orders/raw/",
+        "--STAGING_BUCKET": stagingBucket.bucketName, // 変換ファイル格納バケット
+        "--STAGING_PREFIX": "orders/parquet/",        // prefix
+        "--enable-continuous-cloudwatch-log": "true",
+      },
+      executionProperty: { maxConcurrentRuns: 1 },
+    });
 
+
+    // Glue ワークフロー
+    const workflow = new glue.CfnWorkflow(this, "OrdersWorkflow", {
+      name: "orders-etl-workflow",
+    });
+
+    // Step 1: DQ チェック
+    const t1 = new glue.CfnTrigger(this, "TriggerStartDQ", {
+      name: "t-start-dq",
+      type: "ON_DEMAND",
+      workflowName: workflow.name,
+      actions: [{ jobName: dqJob.name! }],
+    });
+
+    // Step 2: Parquet 変換
+    // ** Glue コンソールの Data Integration and ETL > Triggers から t-after-dq を Activate trigger する必要あり **
+    // -> startOnCreation: true に最初からしておけば問題ない、はず
+    const t2 = new glue.CfnTrigger(this, "TriggerAfterDQ", {
+      name: "t-after-dq",
+      type: "CONDITIONAL", // predicate の条件が成立したら発火する
+      workflowName: workflow.name,
+      startOnCreation: true,
+      predicate: {
+        logical: "AND",    // conditions が 1つでも AND にしておく (エラー回避)
+        conditions: [
+        // dqJob の実行結果（state）が SUCCEEDED と等しい場合に、このトリガーを発火する
+          { 
+            jobName: dqJob.name!,
+            state: "SUCCEEDED",
+            logicalOperator: "EQUALS",
+          }
+        ],
+      },
+      actions: [{ jobName: c2pJob.name! }],
+    });
+
+    // 依存関係
+    t1.addDependency(workflow);
+    t1.addDependency(dqJob);
+
+    t2.addDependency(workflow);
+    t2.addDependency(dqJob);
+    t2.addDependency(c2pJob);
+
+    // Outputs
+    new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
+    new cdk.CfnOutput(this, "WorkflowName", { value: workflow.name! });
+    new cdk.CfnOutput(this, "StartTriggerName", { value: t1.name! });
+    new cdk.CfnOutput(this, "AlertTopicArn", { value: alertTopic.topicArn });
   }
 }
