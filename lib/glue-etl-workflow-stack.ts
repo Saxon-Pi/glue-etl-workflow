@@ -15,6 +15,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     // #1. Data Quality チェック (DQDL ルールセットで品質判定)
     //     - 入力: Raw CSV
     //     - 出力: CloudWatch Logs + S3 に品質結果 JOIN
+    //     - DQ チェックで Fail したら SNS メール通知
     // #2. CSV -> Parquet 変換ジョブ
     //     - 入力: Raw CSV
     //     - 出力: Staging Parquet (partition: year=YYYY/month=MM/day=DD)
@@ -26,8 +27,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     //             - 正規化 (countryを大文字化、空白削除、statusの標準化)
     //             - 派生列追加 (amount_with_tax、order_date、is_high_value)
     //             - 不要行排除 (status != 'CANCELLED')
-    // #4. 通知
-    //     - DQ チェックで Fail したら SNS メール通知
+    // #4. データカタログ作成
     //
     // -------------------------------------------------------------
 
@@ -152,6 +152,28 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       executionProperty: { maxConcurrentRuns: 1 },
     });
 
+    // Glue Database
+    const glueDatabase = new glue.CfnDatabase(this, "OrdersDatabase", {
+      catalogId: this.account,
+      databaseInput: {
+        name: "orders_db",
+      },
+    });
+
+    // クローラ作成
+    const crawler = new glue.CfnCrawler(this, "OrdersCrawler", {
+      name: "orders-curated-crawler",
+      role: glueRole.roleArn,
+      databaseName: glueDatabase.ref,
+      targets: {
+        s3Targets: [
+          {
+            path: `s3://${curatedBucket.bucketName}/orders/curated/`, // データ変換後のバケット
+          },
+        ],
+      },
+    });
+
     // Glue ワークフロー
     const workflow = new glue.CfnWorkflow(this, "OrdersWorkflow", {
       name: "orders-etl-workflow",
@@ -206,6 +228,29 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       actions: [{ jobName: trJob.name! }],
     });
 
+    // Step 4: クローラ実行
+    const t4 = new glue.CfnTrigger(this, "TriggerAfterTransform", {
+      name: "t-after-transform",
+      type: "CONDITIONAL",
+      workflowName: workflow.name,
+      startOnCreation: true,
+      predicate: {
+        logical: "AND",
+        conditions: [
+          {
+            jobName: trJob.name!,
+            state: "SUCCEEDED",
+            logicalOperator: "EQUALS",
+          },
+        ],
+      },
+      actions: [
+        {
+          crawlerName: crawler.name!,
+        },
+      ],
+    });
+
     // 依存関係
     t1.addDependency(workflow);
     t1.addDependency(dqJob);
@@ -217,6 +262,10 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     t3.addDependency(workflow);
     t3.addDependency(c2pJob);
     t3.addDependency(trJob);
+
+    t4.addDependency(workflow);
+    t4.addDependency(trJob);
+    t4.addDependency(crawler);
 
     // Outputs
     new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
