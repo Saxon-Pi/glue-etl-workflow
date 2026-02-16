@@ -129,6 +129,28 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       executionProperty: { maxConcurrentRuns: 1 },
     });
 
+    // Glue ジョブ #3 (データ変換)
+    const trJob = new glue.CfnJob(this, "TransformJob", {
+      name: "orders-transform-curated",
+      role: glueRole.roleArn,
+      glueVersion: "4.0",
+      numberOfWorkers: 2,
+      workerType: "G.1X",
+      command: {
+        name: "glueetl",
+        pythonVersion: "3",
+        scriptLocation: trScript,
+      },
+      defaultArguments: {
+        "--job-language": "python",
+        "--STAGING_BUCKET": stagingBucket.bucketName,
+        "--STAGING_PREFIX": "orders/parquet/",
+        "--CURATED_BUCKET": curatedBucket.bucketName, // 変換ファイル格納バケット
+        "--CURATED_PREFIX": "orders/curated/",        // prefix
+        "--enable-continuous-cloudwatch-log": "true",
+      },
+      executionProperty: { maxConcurrentRuns: 1 },
+    });
 
     // Glue ワークフロー
     const workflow = new glue.CfnWorkflow(this, "OrdersWorkflow", {
@@ -148,11 +170,11 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     // -> startOnCreation: true に最初からしておけば問題ない、はず
     const t2 = new glue.CfnTrigger(this, "TriggerAfterDQ", {
       name: "t-after-dq",
-      type: "CONDITIONAL", // predicate の条件が成立したら発火する
+      type: "CONDITIONAL",   // predicate の条件が成立したら発火する
       workflowName: workflow.name,
-      startOnCreation: true,
+      startOnCreation: true, // 自動で Activate
       predicate: {
-        logical: "AND",    // conditions が 1つでも AND にしておく (エラー回避)
+        logical: "AND",      // conditions が 1つでも AND にしておく (エラー回避)
         conditions: [
         // dqJob の実行結果（state）が SUCCEEDED と等しい場合に、このトリガーを発火する
           { 
@@ -165,6 +187,25 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       actions: [{ jobName: c2pJob.name! }],
     });
 
+    // Step 3: データ変換
+    const t3 = new glue.CfnTrigger(this, "TriggerAfterC2P", {
+      name: "t-after-c2p",
+      type: "CONDITIONAL",
+      workflowName: workflow.name,
+      startOnCreation: true,
+      predicate: {
+        logical: "AND",
+        conditions: [
+          {
+            jobName: c2pJob.name!,
+            state: "SUCCEEDED",
+            logicalOperator: "EQUALS",
+          },
+        ],
+      },
+      actions: [{ jobName: trJob.name! }],
+    });
+
     // 依存関係
     t1.addDependency(workflow);
     t1.addDependency(dqJob);
@@ -172,6 +213,10 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     t2.addDependency(workflow);
     t2.addDependency(dqJob);
     t2.addDependency(c2pJob);
+
+    t3.addDependency(workflow);
+    t3.addDependency(c2pJob);
+    t3.addDependency(trJob);
 
     // Outputs
     new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
