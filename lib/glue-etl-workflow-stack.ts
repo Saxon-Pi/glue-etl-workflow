@@ -188,8 +188,9 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
           // クエリ結果の出力先 S3
           outputLocation: `s3://${athenaResultsBucket.bucketName}/results/`,
         },
-        enforceWorkGroupConfiguration: true,
+        enforceWorkGroupConfiguration: true,          // Workgroup 設定を強制適用
         publishCloudWatchMetricsEnabled: true,
+        bytesScannedCutoffPerQuery: 50 * 1024 * 1024, // スキャン制限 (50MB 制限)
       },
       state: "ENABLED",
     });
