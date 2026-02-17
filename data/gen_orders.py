@@ -3,17 +3,23 @@ import random
 from datetime import datetime, timedelta
 
 rows = []
-base_date = datetime(2026, 2, 1)
 
-total_num = 20000 # レコード数
+start_date = datetime(2026, 1, 1)
+end_date = datetime(2026, 6, 30)
+
+total_days = (end_date - start_date).days
+
+total_num = 100000 # レコード数
 
 for i in range(1, total_num+1):
-    dt = base_date + timedelta(days=random.randint(0, 9))
+    random_days = random.randint(0, total_days)
+    dt = start_date + timedelta(days=random_days)
+
     rows.append([
         f"o-{i}",                                             # order_id
-        f"u-{random.randint(1, 5000)}",                       # user_id
+        f"u-{random.randint(1, 20000)}",                      # user_id
         dt.strftime("%Y-%m-%dT%H:%M:%SZ"),                    # order_ts
-        round(random.uniform(100, 20000), 2),                 # amount
+        round(random.uniform(100, 50000), 2),                 # amount
         "JPY",                                                # currency
         random.choice(["jp", "JP", "us"]),                    # country
         random.choice(["COMPLETED", "REFUNDED", "CANCELLED"]) # status
