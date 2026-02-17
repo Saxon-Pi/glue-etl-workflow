@@ -5,6 +5,7 @@ import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as glue from "aws-cdk-lib/aws-glue";
+import * as athena from "aws-cdk-lib/aws-athena";
 
 export class GlueEtlWorkflowStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -27,11 +28,11 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     //             - 正規化 (countryを大文字化、空白削除、statusの標準化)
     //             - 派生列追加 (amount_with_tax、order_date、is_high_value)
     //             - 不要行排除 (status != 'CANCELLED')
-    // #4. データカタログ作成
+    // #4. データカタログ作成 (Glue クローラ)
     //
     // -------------------------------------------------------------
 
-    // S3 バケット (Raw/Staging/Curated)
+    // S3 バケット (Raw/Staging/Curated/Athena)
     const rawBucket = new s3.Bucket(this, "RawBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -55,6 +56,11 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const athenaResultsBucket = new s3.Bucket(this, "AthenaResultsBucket", {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
     });
 
     // SNS トピック (メール通知用)
@@ -160,7 +166,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       },
     });
 
-    // クローラ作成
+    // Glue クローラ
     const crawler = new glue.CfnCrawler(this, "OrdersCrawler", {
       name: "orders-curated-crawler",
       role: glueRole.roleArn,
@@ -172,6 +178,20 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
           },
         ],
       },
+    });
+
+    // Athena ワークグループ
+    const workgroup = new athena.CfnWorkGroup(this, "OrdersWorkgroup", {
+      name: "orders-workgroup",
+      workGroupConfiguration: {
+        resultConfiguration: {
+          // クエリ結果の出力先 S3
+          outputLocation: `s3://${athenaResultsBucket.bucketName}/results/`,
+        },
+        enforceWorkGroupConfiguration: true,
+        publishCloudWatchMetricsEnabled: true,
+      },
+      state: "ENABLED",
     });
 
     // Glue ワークフロー
