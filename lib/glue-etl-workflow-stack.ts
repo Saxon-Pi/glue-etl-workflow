@@ -201,16 +201,31 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     });
 
     // Step 1: DQ チェック
-    const t1 = new glue.CfnTrigger(this, "TriggerStartDQ", {
-      name: "t-start-dq",
-      type: "ON_DEMAND",
+    // スケジュール起動
+    const scheduledTrigger = new glue.CfnTrigger(this, "ScheduledWorkflowTrigger", {
+      name: "t-start-dq-scheduled",
+      type: "SCHEDULED",
       workflowName: workflow.name,
-      actions: [{ jobName: dqJob.name! }],
+      startOnCreation: true,
+      schedule: "cron(0 3 * * ? *)", // 毎日 03:00 (UTC)
+      actions: [
+        {
+          jobName: dqJob.name!,
+        },
+      ],
     });
+
+    // 手動起動のみでOK の場合は以下
+    //const t1 = new glue.CfnTrigger(this, "TriggerStartDQ", {
+    //  name: "t-start-dq",
+    //  type: "ON_DEMAND",
+    //  workflowName: workflow.name,
+    //  actions: [{ jobName: dqJob.name! }],
+    //});
 
     // Step 2: Parquet 変換
     // ** Glue コンソールの Data Integration and ETL > Triggers から t-after-dq を Activate trigger する必要あり **
-    // -> startOnCreation: true に最初からしておけば問題ない、はず
+    // -> startOnCreation: true に最初からしておけば問題なし
     const t2 = new glue.CfnTrigger(this, "TriggerAfterDQ", {
       name: "t-after-dq",
       type: "CONDITIONAL",   // predicate の条件が成立したら発火する
@@ -273,8 +288,11 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     });
 
     // 依存関係
-    t1.addDependency(workflow);
-    t1.addDependency(dqJob);
+    scheduledTrigger.addDependency(workflow);
+    scheduledTrigger.addDependency(dqJob);
+
+    //t1.addDependency(workflow);
+    //t1.addDependency(dqJob);
 
     t2.addDependency(workflow);
     t2.addDependency(dqJob);
@@ -291,7 +309,8 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     // Outputs
     new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
     new cdk.CfnOutput(this, "WorkflowName", { value: workflow.name! });
-    new cdk.CfnOutput(this, "StartTriggerName", { value: t1.name! });
+    //new cdk.CfnOutput(this, "StartTriggerName", { value: t1.name! });
+    new cdk.CfnOutput(this, "ScheduledTriggerName", { value: scheduledTrigger.name! });
     new cdk.CfnOutput(this, "AlertTopicArn", { value: alertTopic.topicArn });
   }
 }
