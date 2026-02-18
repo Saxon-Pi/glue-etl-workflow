@@ -5,6 +5,7 @@ import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as glue from "aws-cdk-lib/aws-glue";
+import * as athena from "aws-cdk-lib/aws-athena";
 
 export class GlueEtlWorkflowStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -15,6 +16,7 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     // #1. Data Quality チェック (DQDL ルールセットで品質判定)
     //     - 入力: Raw CSV
     //     - 出力: CloudWatch Logs + S3 に品質結果 JOIN
+    //     - DQ チェックで Fail したら SNS メール通知
     // #2. CSV -> Parquet 変換ジョブ
     //     - 入力: Raw CSV
     //     - 出力: Staging Parquet (partition: year=YYYY/month=MM/day=DD)
@@ -26,12 +28,11 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     //             - 正規化 (countryを大文字化、空白削除、statusの標準化)
     //             - 派生列追加 (amount_with_tax、order_date、is_high_value)
     //             - 不要行排除 (status != 'CANCELLED')
-    // #4. 通知
-    //     - DQ チェックで Fail したら SNS メール通知
+    // #4. データカタログ作成 (Glue クローラ)
     //
     // -------------------------------------------------------------
 
-    // S3 バケット (Raw/Staging/Curated)
+    // S3 バケット (Raw/Staging/Curated/Athena)
     const rawBucket = new s3.Bucket(this, "RawBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -55,6 +56,11 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const athenaResultsBucket = new s3.Bucket(this, "AthenaResultsBucket", {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
     });
 
     // SNS トピック (メール通知用)
@@ -129,6 +135,65 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       executionProperty: { maxConcurrentRuns: 1 },
     });
 
+    // Glue ジョブ #3 (データ変換)
+    const trJob = new glue.CfnJob(this, "TransformJob", {
+      name: "orders-transform-curated",
+      role: glueRole.roleArn,
+      glueVersion: "4.0",
+      numberOfWorkers: 2,
+      workerType: "G.1X",
+      command: {
+        name: "glueetl",
+        pythonVersion: "3",
+        scriptLocation: trScript,
+      },
+      defaultArguments: {
+        "--job-language": "python",
+        "--STAGING_BUCKET": stagingBucket.bucketName,
+        "--STAGING_PREFIX": "orders/parquet/",
+        "--CURATED_BUCKET": curatedBucket.bucketName, // 変換ファイル格納バケット
+        "--CURATED_PREFIX": "orders/curated/",        // prefix
+        "--enable-continuous-cloudwatch-log": "true",
+      },
+      executionProperty: { maxConcurrentRuns: 1 },
+    });
+
+    // Glue Database
+    const glueDatabase = new glue.CfnDatabase(this, "OrdersDatabase", {
+      catalogId: this.account,
+      databaseInput: {
+        name: "orders_db",
+      },
+    });
+
+    // Glue クローラ
+    const crawler = new glue.CfnCrawler(this, "OrdersCrawler", {
+      name: "orders-curated-crawler",
+      role: glueRole.roleArn,
+      databaseName: glueDatabase.ref,
+      targets: {
+        s3Targets: [
+          {
+            path: `s3://${curatedBucket.bucketName}/orders/curated/`, // データ変換後のバケット
+          },
+        ],
+      },
+    });
+
+    // Athena ワークグループ
+    const workgroup = new athena.CfnWorkGroup(this, "OrdersWorkgroup", {
+      name: "orders-workgroup",
+      workGroupConfiguration: {
+        resultConfiguration: {
+          // クエリ結果の出力先 S3
+          outputLocation: `s3://${athenaResultsBucket.bucketName}/results/`,
+        },
+        enforceWorkGroupConfiguration: true,          // Workgroup 設定を強制適用
+        publishCloudWatchMetricsEnabled: true,
+        bytesScannedCutoffPerQuery: 50 * 1024 * 1024, // スキャン制限 (50MB 制限)
+      },
+      state: "ENABLED",
+    });
 
     // Glue ワークフロー
     const workflow = new glue.CfnWorkflow(this, "OrdersWorkflow", {
@@ -136,23 +201,38 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
     });
 
     // Step 1: DQ チェック
-    const t1 = new glue.CfnTrigger(this, "TriggerStartDQ", {
-      name: "t-start-dq",
-      type: "ON_DEMAND",
+    // スケジュール起動
+    const scheduledTrigger = new glue.CfnTrigger(this, "ScheduledWorkflowTrigger", {
+      name: "t-start-dq-scheduled",
+      type: "SCHEDULED",
       workflowName: workflow.name,
-      actions: [{ jobName: dqJob.name! }],
+      startOnCreation: true,
+      schedule: "cron(0 3 * * ? *)", // 毎日 03:00 (UTC)
+      actions: [
+        {
+          jobName: dqJob.name!,
+        },
+      ],
     });
+
+    // 手動起動のみでOK の場合は以下
+    //const t1 = new glue.CfnTrigger(this, "TriggerStartDQ", {
+    //  name: "t-start-dq",
+    //  type: "ON_DEMAND",
+    //  workflowName: workflow.name,
+    //  actions: [{ jobName: dqJob.name! }],
+    //});
 
     // Step 2: Parquet 変換
     // ** Glue コンソールの Data Integration and ETL > Triggers から t-after-dq を Activate trigger する必要あり **
-    // -> startOnCreation: true に最初からしておけば問題ない、はず
+    // -> startOnCreation: true に最初からしておけば問題なし
     const t2 = new glue.CfnTrigger(this, "TriggerAfterDQ", {
       name: "t-after-dq",
-      type: "CONDITIONAL", // predicate の条件が成立したら発火する
+      type: "CONDITIONAL",   // predicate の条件が成立したら発火する
       workflowName: workflow.name,
-      startOnCreation: true,
+      startOnCreation: true, // 自動で Activate
       predicate: {
-        logical: "AND",    // conditions が 1つでも AND にしておく (エラー回避)
+        logical: "AND",      // conditions が 1つでも AND にしておく (エラー回避)
         conditions: [
         // dqJob の実行結果（state）が SUCCEEDED と等しい場合に、このトリガーを発火する
           { 
@@ -165,18 +245,72 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       actions: [{ jobName: c2pJob.name! }],
     });
 
+    // Step 3: データ変換
+    const t3 = new glue.CfnTrigger(this, "TriggerAfterC2P", {
+      name: "t-after-c2p",
+      type: "CONDITIONAL",
+      workflowName: workflow.name,
+      startOnCreation: true,
+      predicate: {
+        logical: "AND",
+        conditions: [
+          {
+            jobName: c2pJob.name!,
+            state: "SUCCEEDED",
+            logicalOperator: "EQUALS",
+          },
+        ],
+      },
+      actions: [{ jobName: trJob.name! }],
+    });
+
+    // Step 4: クローラ実行
+    const t4 = new glue.CfnTrigger(this, "TriggerAfterTransform", {
+      name: "t-after-transform",
+      type: "CONDITIONAL",
+      workflowName: workflow.name,
+      startOnCreation: true,
+      predicate: {
+        logical: "AND",
+        conditions: [
+          {
+            jobName: trJob.name!,
+            state: "SUCCEEDED",
+            logicalOperator: "EQUALS",
+          },
+        ],
+      },
+      actions: [
+        {
+          crawlerName: crawler.name!,
+        },
+      ],
+    });
+
     // 依存関係
-    t1.addDependency(workflow);
-    t1.addDependency(dqJob);
+    scheduledTrigger.addDependency(workflow);
+    scheduledTrigger.addDependency(dqJob);
+
+    //t1.addDependency(workflow);
+    //t1.addDependency(dqJob);
 
     t2.addDependency(workflow);
     t2.addDependency(dqJob);
     t2.addDependency(c2pJob);
 
+    t3.addDependency(workflow);
+    t3.addDependency(c2pJob);
+    t3.addDependency(trJob);
+
+    t4.addDependency(workflow);
+    t4.addDependency(trJob);
+    t4.addDependency(crawler);
+
     // Outputs
     new cdk.CfnOutput(this, "RawBucketName", { value: rawBucket.bucketName });
     new cdk.CfnOutput(this, "WorkflowName", { value: workflow.name! });
-    new cdk.CfnOutput(this, "StartTriggerName", { value: t1.name! });
+    //new cdk.CfnOutput(this, "StartTriggerName", { value: t1.name! });
+    new cdk.CfnOutput(this, "ScheduledTriggerName", { value: scheduledTrigger.name! });
     new cdk.CfnOutput(this, "AlertTopicArn", { value: alertTopic.topicArn });
   }
 }
