@@ -280,6 +280,87 @@ month	country	orders	gross_sales	high_value_orders
 2026-05-01 00:00:00	US	3841	95970182.94000001	3094	
 2026-06-01 00:00:00	JP	7395	204825582.2900002	5927	
 ```
+## EXPLAIN で実行計画を確認
+元のテーブル  
+```sql
+EXPLAIN
+SELECT
+  date_trunc('month', order_ts) AS month,
+  country,
+  COUNT(*) AS orders,
+  SUM(amount_with_tax) AS gross_sales
+FROM curated_internal
+GROUP BY 1,2;
+```
+```
+【実行結果】
+QUERY PLAN
+XN HashAggregate  (cost=0.24..0.27 rows=6 width=30)	
+  ->  XN Seq Scan on mv_tbl__mv_monthly_country_sales__0 derived_table1  (cost=0.00..0.12 rows=12 width=30)	
+```
+MV  
+```sql
+EXPLAIN
+SELECT *
+FROM mv_monthly_country_sales;
+```
+```
+【実行結果】
+QUERY PLAN
+XN Seq Scan on mv_tbl__mv_monthly_country_sales__0 derived_table1  (cost=0.00..0.12 rows=12 width=30)	
+```
+## SORTKEY の効果
+ソートキー(order_ts) で絞り込み  
+```sql
+SELECT COUNT(*)
+FROM curated_internal
+WHERE order_ts BETWEEN '2026-06-01' AND '2026-06-30';
+```
+```
+【実行結果】
+Query ID: 612544
+Elapsed time: 221 ms
+Total rows: 1
+
+count
+11042	
+```
+非ソートキーで絞り込み  
+```sql
+SELECT COUNT(*)
+FROM curated_internal
+WHERE country = 'JP';
+```
+```
+【実行結果】
+Query ID: 612591
+Elapsed time: 5313 ms
+Total rows: 1
+
+count
+44532
+```
+## DISTSTYLE の確認
+現在は AUTO分散
+```sql
+SELECT "table", diststyle
+FROM svv_table_info
+WHERE "table" = 'curated_internal';
+```
+```
+【実行結果】
+table	diststyle
+curated_internal	AUTO(EVEN)
+→ AUTO分散の結果、EVEN分散が選ばれている
+```
+## Concurrency / Serverless
+```
+Redshift Serverlessは：
+	•	RPU単位で自動スケール
+	•	ワークロードに応じてスケールアップ
+	•	使ってないときは縮小
+```
+
 ## 削除
 ```sql
 DROP MATERIALIZED VIEW IF EXISTS mv_monthly_country_sales;
