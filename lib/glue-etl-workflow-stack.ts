@@ -6,6 +6,7 @@ import * as sns from "aws-cdk-lib/aws-sns";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as glue from "aws-cdk-lib/aws-glue";
 import * as athena from "aws-cdk-lib/aws-athena";
+import * as redshift from "aws-cdk-lib/aws-redshiftserverless";
 
 export class GlueEtlWorkflowStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -194,6 +195,34 @@ export class GlueEtlWorkflowStack extends cdk.Stack {
       },
       state: "ENABLED",
     });
+
+    // Redshift IAM ロール
+    const redshiftRole = new iam.Role(this, "RedshiftRole", {
+      assumedBy: new iam.ServicePrincipal("redshift.amazonaws.com"),
+    });
+    curatedBucket.grantRead(redshiftRole);
+    redshiftRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSGlueServiceRole")
+    );
+
+    // Redshift Namespace
+    const rsNamespace = new redshift.CfnNamespace(this, "RedshiftNamespace", {
+      namespaceName: "orders-namespace",
+      dbName: "dev",
+      manageAdminPassword: true, // Redshift が自動でシークレットを作成 (パスワード自動生成&管理)
+      adminUsername: "adminuser",
+      iamRoles: [redshiftRole.roleArn],
+    });
+    
+    // Redshift ワークグループ
+    const rsWorkgroup = new redshift.CfnWorkgroup(this, "RedshiftWorkgroup", {
+      workgroupName: "orders-workgroup",
+      namespaceName: rsNamespace.namespaceName!,
+      baseCapacity: 8, // 最小容量
+      publiclyAccessible: true,
+    });
+
+    rsWorkgroup.addDependency(rsNamespace);
 
     // Glue ワークフロー
     const workflow = new glue.CfnWorkflow(this, "OrdersWorkflow", {
