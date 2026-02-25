@@ -1,14 +1,160 @@
-# Welcome to your CDK TypeScript project
+# AWS データ分析パイプライン構築
+(Glue + Athena + Redshift Serverless)
 
-This is a blank project for CDK development with TypeScript.
+## 概要
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+- データソースはS3に保存されたCSVデータ
+- Glueワークフローを構築し、データ品質チェック・ETL処理・Parquet保存をスケジュール実行
+- AthenaおよびRedshift Serverlessを用いた分析基盤を構築
 
-## Useful commands
+パフォーマンス最適化・パーティション設計・DWH設計も考慮した構成としている
 
-* `npm run build`   compile typescript to js
-* `npm run watch`   watch for changes and compile
-* `npm run test`    perform the jest unit tests
-* `npx cdk deploy`  deploy this stack to your default AWS account/region
-* `npx cdk diff`    compare deployed stack with current state
-* `npx cdk synth`   emits the synthesized CloudFormation template
+------------------------------------------------------------------------
+
+# 設計思想
+
+-   S3をデータレイクの単一ソースとする
+-   Curated層で分析用途に最適化
+-   分析クエリのパターンを前提にしたソートキー設計
+-   Serverless構成によるスケーラブルなDWH
+
+------------------------------------------------------------------------
+
+# アーキテクチャ概要
+
+S3（Raw CSV）\
+↓\
+Glue Data Quality（DQDL）\
+↓\
+Glue ETL（CSV → Parquet + Partition）\
+↓\
+Glue Transform（Curated層）\
+↓\
+S3（Parquet: year/month/day パーティション）\
+↓\
+Glue Data Catalog\
+↓\
+Athena（アドホック分析）\
+↓\
+Redshift Spectrum（外部参照）\
+↓\
+Redshift COPY（内部DWH化）\
+↓\
+Materialized View（集計高速化）
+
+------------------------------------------------------------------------
+
+# 1. データ品質レイヤー（Glue + DQDL）
+
+## データ品質チェック
+
+Glue Data Quality（DQDL）を用いて、変換前に品質検証を実施
+
+実装ルール例：
+
+-   order_id の NULLチェック
+-   order_id の一意性チェック
+-   amount \>= 0 の検証
+-   status の値検証
+
+品質エラー時：
+
+-   SNS通知
+-   ワークフロー停止
+
+下流に不正データを流さない設計
+
+------------------------------------------------------------------------
+
+# 2. ETL・データ最適化
+
+## CSV → Parquet 変換
+
+-   Snappy圧縮
+-   列指向フォーマット
+-   year/month/day パーティション設計
+
+order_ts から年・月・日を抽出し、以下の形式で保存：
+
+year=2026/month=02/day=01/
+
+### 効果
+
+-   Athenaでのパーティションプルーニング
+-   スキャンデータ量削減
+-   分析クエリ高速化
+
+------------------------------------------------------------------------
+
+## Curated層でのビジネスロジック実装
+
+-   CANCELLEDデータ除外
+-   重複削除
+-   税率列追加（country別）
+-   amount_with_tax 計算列追加
+-   高額フラグ列追加
+
+分析用途を想定した整形済みデータを生成
+
+------------------------------------------------------------------------
+
+# 3. Athena分析検証
+
+検証項目：
+
+-   パーティション指定による高速化
+-   Parquet列指向の効果
+-   スキャンデータ量の比較
+
+パーティション指定あり/なしで実行時間とスキャンサイズの差を確認
+
+------------------------------------------------------------------------
+
+# 4. Redshift Serverless 構築
+
+## Spectrum（S3外部参照）
+
+Glue Data Catalogを利用し、S3上のParquetデータを直接参照可能に構成
+
+外部スキーマ作成後、S3データを直接クエリ可能
+
+------------------------------------------------------------------------
+
+## COPYによる内部テーブル化
+
+ParquetデータをRedshift内部ストレージへロード
+
+内部DWHテーブル設計：
+
+-   DISTSTYLE AUTO
+-   SORTKEY(order_ts)
+
+------------------------------------------------------------------------
+
+## パフォーマンス検証
+
+確認内容：
+
+-   SORTKEYによる範囲検索高速化（Zone Map効果）
+-   非ソートキー検索はフルスキャン
+-   WHERE句の記述順は無関係
+-   複合ソートキーの先頭列が重要
+
+EXPLAINにより実行計画を確認
+
+------------------------------------------------------------------------
+
+# 5. Materialized Viewによる高速化
+
+月次・国別売上集計をMV化
+
+検証結果：
+
+-   元テーブル集計：約15秒
+-   MV参照：約0.1秒
+
+Query Rewriteにより、自動的にMVが利用されることを確認
+
+REFRESHで更新制御可能
+
+------------------------------------------------------------------------
